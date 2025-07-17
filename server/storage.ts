@@ -5,6 +5,8 @@ import {
   type Enrollment, type InsertEnrollment, type Certificate, type InsertCertificate,
   type Payment, type InsertPayment
 } from "@shared/schema";
+import { db } from "./db";
+import { eq, and, desc, asc } from "drizzle-orm";
 
 export interface IStorage {
   // User operations
@@ -58,6 +60,237 @@ export interface IStorage {
   getPaymentsByUser(userId: number): Promise<Payment[]>;
   createPayment(payment: InsertPayment): Promise<Payment>;
   updatePayment(id: number, updates: Partial<Payment>): Promise<Payment | undefined>;
+}
+
+export class DatabaseStorage implements IStorage {
+  async getUser(id: number): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user || undefined;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user || undefined;
+  }
+
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.email, email));
+    return user || undefined;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values(insertUser)
+      .returning();
+    return user;
+  }
+
+  async updateUser(id: number, updates: Partial<User>): Promise<User | undefined> {
+    const [user] = await db
+      .update(users)
+      .set(updates)
+      .where(eq(users.id, id))
+      .returning();
+    return user || undefined;
+  }
+
+  // Course operations
+  async getCourse(id: number): Promise<Course | undefined> {
+    const [course] = await db.select().from(courses).where(eq(courses.id, id));
+    return course || undefined;
+  }
+
+  async getCourses(): Promise<Course[]> {
+    return await db.select().from(courses).where(eq(courses.isPublished, true));
+  }
+
+  async getCoursesByInstructor(instructorId: number): Promise<Course[]> {
+    return await db.select().from(courses).where(eq(courses.instructorId, instructorId));
+  }
+
+  async getCoursesByCategory(category: string): Promise<Course[]> {
+    return await db.select().from(courses).where(and(eq(courses.category, category), eq(courses.isPublished, true)));
+  }
+
+  async createCourse(insertCourse: InsertCourse): Promise<Course> {
+    const [course] = await db
+      .insert(courses)
+      .values(insertCourse)
+      .returning();
+    return course;
+  }
+
+  async updateCourse(id: number, updates: Partial<Course>): Promise<Course | undefined> {
+    const [course] = await db
+      .update(courses)
+      .set(updates)
+      .where(eq(courses.id, id))
+      .returning();
+    return course || undefined;
+  }
+
+  async deleteCourse(id: number): Promise<boolean> {
+    const result = await db.delete(courses).where(eq(courses.id, id));
+    return result.rowCount > 0;
+  }
+
+  // Lesson operations
+  async getLesson(id: number): Promise<Lesson | undefined> {
+    const [lesson] = await db.select().from(lessons).where(eq(lessons.id, id));
+    return lesson || undefined;
+  }
+
+  async getLessonsByCourse(courseId: number): Promise<Lesson[]> {
+    return await db.select().from(lessons).where(eq(lessons.courseId, courseId)).orderBy(asc(lessons.order));
+  }
+
+  async createLesson(insertLesson: InsertLesson): Promise<Lesson> {
+    const [lesson] = await db
+      .insert(lessons)
+      .values(insertLesson)
+      .returning();
+    return lesson;
+  }
+
+  async updateLesson(id: number, updates: Partial<Lesson>): Promise<Lesson | undefined> {
+    const [lesson] = await db
+      .update(lessons)
+      .set(updates)
+      .where(eq(lessons.id, id))
+      .returning();
+    return lesson || undefined;
+  }
+
+  async deleteLesson(id: number): Promise<boolean> {
+    const result = await db.delete(lessons).where(eq(lessons.id, id));
+    return result.rowCount > 0;
+  }
+
+  // Quiz operations
+  async getQuiz(id: number): Promise<Quiz | undefined> {
+    const [quiz] = await db.select().from(quizzes).where(eq(quizzes.id, id));
+    return quiz || undefined;
+  }
+
+  async getQuizzesByCourse(courseId: number): Promise<Quiz[]> {
+    return await db.select().from(quizzes).where(eq(quizzes.courseId, courseId));
+  }
+
+  async createQuiz(insertQuiz: InsertQuiz): Promise<Quiz> {
+    const [quiz] = await db
+      .insert(quizzes)
+      .values(insertQuiz)
+      .returning();
+    return quiz;
+  }
+
+  async updateQuiz(id: number, updates: Partial<Quiz>): Promise<Quiz | undefined> {
+    const [quiz] = await db
+      .update(quizzes)
+      .set(updates)
+      .where(eq(quizzes.id, id))
+      .returning();
+    return quiz || undefined;
+  }
+
+  async deleteQuiz(id: number): Promise<boolean> {
+    const result = await db.delete(quizzes).where(eq(quizzes.id, id));
+    return result.rowCount > 0;
+  }
+
+  // Quiz attempt operations
+  async getQuizAttempt(id: number): Promise<QuizAttempt | undefined> {
+    const [attempt] = await db.select().from(quizAttempts).where(eq(quizAttempts.id, id));
+    return attempt || undefined;
+  }
+
+  async getQuizAttemptsByUser(userId: number): Promise<QuizAttempt[]> {
+    return await db.select().from(quizAttempts).where(eq(quizAttempts.userId, userId));
+  }
+
+  async createQuizAttempt(insertAttempt: InsertQuizAttempt): Promise<QuizAttempt> {
+    const [attempt] = await db
+      .insert(quizAttempts)
+      .values(insertAttempt)
+      .returning();
+    return attempt;
+  }
+
+  // Enrollment operations
+  async getEnrollment(userId: number, courseId: number): Promise<Enrollment | undefined> {
+    const [enrollment] = await db
+      .select()
+      .from(enrollments)
+      .where(and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId)));
+    return enrollment || undefined;
+  }
+
+  async getEnrollmentsByUser(userId: number): Promise<Enrollment[]> {
+    return await db.select().from(enrollments).where(eq(enrollments.userId, userId));
+  }
+
+  async createEnrollment(insertEnrollment: InsertEnrollment): Promise<Enrollment> {
+    const [enrollment] = await db
+      .insert(enrollments)
+      .values(insertEnrollment)
+      .returning();
+    return enrollment;
+  }
+
+  async updateEnrollment(id: number, updates: Partial<Enrollment>): Promise<Enrollment | undefined> {
+    const [enrollment] = await db
+      .update(enrollments)
+      .set(updates)
+      .where(eq(enrollments.id, id))
+      .returning();
+    return enrollment || undefined;
+  }
+
+  // Certificate operations
+  async getCertificate(id: number): Promise<Certificate | undefined> {
+    const [certificate] = await db.select().from(certificates).where(eq(certificates.id, id));
+    return certificate || undefined;
+  }
+
+  async getCertificatesByUser(userId: number): Promise<Certificate[]> {
+    return await db.select().from(certificates).where(eq(certificates.userId, userId));
+  }
+
+  async createCertificate(insertCertificate: InsertCertificate): Promise<Certificate> {
+    const [certificate] = await db
+      .insert(certificates)
+      .values(insertCertificate)
+      .returning();
+    return certificate;
+  }
+
+  // Payment operations
+  async getPayment(id: number): Promise<Payment | undefined> {
+    const [payment] = await db.select().from(payments).where(eq(payments.id, id));
+    return payment || undefined;
+  }
+
+  async getPaymentsByUser(userId: number): Promise<Payment[]> {
+    return await db.select().from(payments).where(eq(payments.userId, userId));
+  }
+
+  async createPayment(insertPayment: InsertPayment): Promise<Payment> {
+    const [payment] = await db
+      .insert(payments)
+      .values(insertPayment)
+      .returning();
+    return payment;
+  }
+
+  async updatePayment(id: number, updates: Partial<Payment>): Promise<Payment | undefined> {
+    const [payment] = await db
+      .update(payments)
+      .set(updates)
+      .where(eq(payments.id, id))
+      .returning();
+    return payment || undefined;
+  }
 }
 
 export class MemStorage implements IStorage {
