@@ -1,13 +1,15 @@
 import { Link, useLocation } from "wouter";
-import { Search, Bell, User } from "lucide-react";
+import { Search, Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { useAuth } from "../../context/authContext";
 
 export function Header() {
-  const [location] = useLocation();
-  
+  const [location, setLocation] = useLocation();
+  const { user, setUser } = useAuth();
+
   const navItems = [
     { href: "/", label: "Dashboard" },
     { href: "/my-courses", label: "My Courses" },
@@ -19,6 +21,12 @@ export function Header() {
     if (path === "/" && location === "/") return true;
     if (path !== "/" && location.startsWith(path)) return true;
     return false;
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("user");
+    setUser(null);
+    setLocation("/"); // Redirect to landing page after logout
   };
 
   return (
@@ -49,7 +57,7 @@ export function Header() {
               ))}
             </nav>
           </div>
-          
+
           <div className="flex items-center space-x-4">
             <div className="relative">
               <Input
@@ -59,24 +67,54 @@ export function Header() {
               />
               <Search className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
             </div>
-            
+
             <ThemeToggle />
-            
+
             <Button variant="ghost" size="icon">
               <Bell className="h-5 w-5" />
             </Button>
-            
-            <div className="flex items-center space-x-3">
-              <Avatar>
-                <AvatarFallback>JD</AvatarFallback>
-              </Avatar>
-              <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                John Doe
-              </span>
-            </div>
+
+            {user ? (
+              <div className="flex items-center space-x-3">
+                <Avatar>
+                  <AvatarFallback>
+                    {user.name
+                      ? user.name
+                          .split(" ")
+                          .map((n: string) => n[0])
+                          .join("")
+                          .toUpperCase()
+                      : "U"}
+                  </AvatarFallback>
+                </Avatar>
+                <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                  {user.name || "User"}
+                </span>
+                <Button variant="outline" size="sm" onClick={handleLogout}>
+                  Logout
+                </Button>
+              </div>
+            ) : (
+              <div className="flex items-center space-x-4">
+                <Link
+                  href="/login"
+                  className="text-sm text-blue-500 hover:underline"
+                >
+                  Login
+                </Link>
+                <Link
+                  href="/signup"
+                  className="text-sm text-blue-500 hover:underline"
+                >
+                  Signup
+                </Link>
+              </div>
+            )}
           </div>
         </div>
       </div>
     </header>
   );
 }
+
+export default Header;

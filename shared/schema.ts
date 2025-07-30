@@ -89,10 +89,18 @@ export const payments = pgTable("payments", {
   userId: integer("user_id").notNull(),
   courseId: integer("course_id").notNull(),
   amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+
+  // New Razorpay fields
+  razorpayOrderId: text("razorpay_order_id").notNull(),
+  razorpayPaymentId: text("razorpay_payment_id"),
+
+  // Stripe field if needed for fallback
   stripePaymentIntentId: text("stripe_payment_intent_id"),
+
   status: text("status").notNull(), // pending, completed, failed
   createdAt: timestamp("created_at").defaultNow(),
 });
+
 
 // Insert schemas
 export const insertUserSchema = createInsertSchema(users).omit({

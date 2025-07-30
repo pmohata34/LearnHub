@@ -6,28 +6,46 @@ import { Button } from "@/components/ui/button";
 import { CourseCard } from "@/components/course/course-card";
 import { CertificateDisplay } from "@/components/certificate/certificate-display";
 import { Link } from "wouter";
+import { useAuth } from "@/context/authContext";
+import { useLocation } from "wouter";
+import { useEffect } from "react";
+
 
 // Mock user ID - in a real app, this would come from authentication
 const CURRENT_USER_ID = 1;
 
 export default function Dashboard() {
+  const { user } = useAuth();
+  const [, setLocation] = useLocation();
+
+  useEffect(() => {
+    if (!user) {
+      setLocation("/login");
+    }
+  }, [user]);
+
+  const userId = user?.id;
+
   const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ["/api/users", CURRENT_USER_ID, "stats"],
+    queryKey: ["/api/users", userId, "stats"],
+    enabled: !!userId,
   });
 
   const { data: enrollments, isLoading: enrollmentsLoading } = useQuery({
-    queryKey: ["/api/users", CURRENT_USER_ID, "enrollments"],
+    queryKey: ["/api/users", userId, "enrollments"],
+    enabled: !!userId,
   });
 
   const { data: certificates, isLoading: certificatesLoading } = useQuery({
-    queryKey: ["/api/users", CURRENT_USER_ID, "certificates"],
+    queryKey: ["/api/users", userId, "certificates"],
+    enabled: !!userId,
   });
 
   const { data: recommendedCourses, isLoading: coursesLoading } = useQuery({
     queryKey: ["/api/courses"],
   });
 
-  if (statsLoading || enrollmentsLoading || certificatesLoading || coursesLoading) {
+  if (!user || statsLoading || enrollmentsLoading || certificatesLoading || coursesLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-spin w-8 h-8 border-4 border-primary border-t-transparent rounded-full" />
@@ -41,7 +59,6 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Header */}
         <div className="mb-8">
           <div className="flex justify-between items-center mb-6">
             <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100 font-display">

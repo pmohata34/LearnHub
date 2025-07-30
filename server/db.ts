@@ -1,15 +1,20 @@
-import { Pool, neonConfig } from '@neondatabase/serverless';
-import { drizzle } from 'drizzle-orm/neon-serverless';
-import ws from "ws";
-import * as schema from "@shared/schema";
+import { MongoClient, Db } from "mongodb";
 
-neonConfig.webSocketConstructor = ws;
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017";
+const DB_NAME = process.env.DB_NAME || "LearnHub";
 
-if (!process.env.DATABASE_URL) {
-  throw new Error(
-    "DATABASE_URL must be set. Did you forget to provision a database?",
-  );
+let cachedClient: MongoClient | null = null;
+let cachedDb: Db | null = null;
+
+export async function getDb(): Promise<Db> {
+  if (cachedDb) return cachedDb;
+
+  const client = cachedClient || new MongoClient(MONGO_URI);
+  await client.connect();
+
+  const db = client.db(DB_NAME);
+  cachedClient = client;
+  cachedDb = db;
+
+  return db;
 }
-
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-export const db = drizzle({ client: pool, schema });

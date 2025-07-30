@@ -1,43 +1,51 @@
 import type { Express } from "express";
 import express from "express";
 import { createServer, type Server } from "http";
-import Stripe from "stripe";
-import { storage } from "./storage";
-import { insertCourseSchema, insertLessonSchema, insertQuizSchema, insertQuizAttemptSchema, insertEnrollmentSchema, insertUserSchema } from "@shared/schema";
-import { z } from "zod";
-import multer from "multer";
 import path from "path";
+import multer from "multer";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import Razorpay from "razorpay";
+import crypto from "crypto";
+import paymentRoutes from "./paymentRoutes";
+import { storage } from "./storage";
+import {
+  insertCourseSchema,
+  insertLessonSchema,
+  insertQuizSchema,
+  insertEnrollmentSchema,
+  insertUserSchema,
+} from "@shared/schema";
 
-// Initialize Stripe - will use environment variables
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2025-06-30.basil",
-}) : null;
 
-// Configure multer for file uploads
+const JWT_SECRET = process.env.JWT_SECRET || "default_jwt_secret";
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID!,
+  key_secret: process.env.RAZORPAY_KEY_SECRET!,
+});
+
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (req, file, cb) => {
-      cb(null, 'uploads/');
-    },
-    filename: (req, file, cb) => {
-      cb(null, Date.now() + path.extname(file.originalname));
-    }
+    destination: (_, __, cb) => cb(null, "uploads/"),
+    filename: (_, file, cb) => cb(null, Date.now() + path.extname(file.originalname)),
   }),
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB limit
+  limits: { fileSize: 100 * 1024 * 1024 },
 });
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Auth routes (simplified - in production would use proper auth)
+  // Serve uploads
+  app.use("/uploads", express.static("uploads"));
+
+  // Auth Routes
   app.post("/api/auth/login", async (req, res) => {
     try {
       const { email, password } = req.body;
       const user = await storage.getUserByEmail(email);
-      
-      if (!user || user.password !== password) {
+      if (!user || !(await bcrypt.compare(password, user.password))) {
         return res.status(401).json({ message: "Invalid credentials" });
       }
-      
-      res.json({ user: { ...user, password: undefined } });
+      const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
+      res.json({ user: { ...user, password: undefined }, token });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -47,44 +55,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const userData = insertUserSchema.parse(req.body);
       const existingUser = await storage.getUserByEmail(userData.email);
-      
-      if (existingUser) {
-        return res.status(400).json({ message: "User already exists" });
-      }
-      
-      const user = await storage.createUser(userData);
-      res.json({ user: { ...user, password: undefined } });
+      if (existingUser) return res.status(400).json({ message: "User already exists" });
+      const hashedPassword = await bcrypt.hash(userData.password, 10);
+      const newUser = await storage.createUser({ ...userData, password: hashedPassword });
+      const token = jwt.sign({ id: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: "7d" });
+      res.status(201).json({ user: { ...newUser, password: undefined }, token });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
   });
 
-  // Course routes
+  // Course Routes
   app.get("/api/courses", async (req, res) => {
     try {
-      const { category } = req.query;
-      let courses;
-      
-      if (category) {
-        courses = await storage.getCoursesByCategory(category as string);
-      } else {
-        courses = await storage.getCourses();
-      }
-      
-      // Get instructor info for each course
-      const coursesWithInstructor = await Promise.all(
-        courses.map(async (course) => {
-          const instructor = await storage.getUser(course.instructorId);
-          return {
-            ...course,
-            instructor: instructor ? { id: instructor.id, username: instructor.username } : null
-          };
-        })
+      const courses = req.query.category
+        ? await storage.getCoursesByCategory(req.query.category as string)
+        : await storage.getCourses();
+      const enriched = await Promise.all(
+        courses.map(async (c) => ({
+          ...c,
+          instructor: await storage.getUser(c.instructorId).then((i) => i && { id: i.id, username: i.username }),
+        }))
       );
-      
-      res.json(coursesWithInstructor);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+      res.json(enriched);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
@@ -92,339 +87,223 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const courseId = parseInt(req.params.id);
       const course = await storage.getCourse(courseId);
-      
-      if (!course) {
-        return res.status(404).json({ message: "Course not found" });
-      }
-      
-      const instructor = await storage.getUser(course.instructorId);
-      const lessons = await storage.getLessonsByCourse(courseId);
-      const quizzes = await storage.getQuizzesByCourse(courseId);
-      
+      if (!course) return res.status(404).json({ message: "Course not found" });
+      const [instructor, lessons, quizzes] = await Promise.all([
+        storage.getUser(course.instructorId),
+        storage.getLessonsByCourse(courseId),
+        storage.getQuizzesByCourse(courseId),
+      ]);
       res.json({
         ...course,
         instructor: instructor ? { id: instructor.id, username: instructor.username } : null,
         lessons,
-        quizzes
+        quizzes,
       });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
   app.post("/api/courses", async (req, res) => {
     try {
-      const courseData = insertCourseSchema.parse(req.body);
-      const course = await storage.createCourse(courseData);
+      const data = insertCourseSchema.parse(req.body);
+      const course = await storage.createCourse(data);
       res.json(course);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
   app.put("/api/courses/:id", async (req, res) => {
     try {
       const courseId = parseInt(req.params.id);
-      const updates = req.body;
-      const course = await storage.updateCourse(courseId, updates);
-      
-      if (!course) {
-        return res.status(404).json({ message: "Course not found" });
-      }
-      
+      const course = await storage.updateCourse(courseId, req.body);
+      if (!course) return res.status(404).json({ message: "Course not found" });
       res.json(course);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
-  // Lesson routes
   app.get("/api/courses/:courseId/lessons", async (req, res) => {
     try {
-      const courseId = parseInt(req.params.courseId);
-      const lessons = await storage.getLessonsByCourse(courseId);
+      const lessons = await storage.getLessonsByCourse(parseInt(req.params.courseId));
       res.json(lessons);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
   app.post("/api/courses/:courseId/lessons", async (req, res) => {
     try {
-      const courseId = parseInt(req.params.courseId);
-      const lessonData = insertLessonSchema.parse({ ...req.body, courseId });
+      const lessonData = insertLessonSchema.parse({ ...req.body, courseId: parseInt(req.params.courseId) });
       const lesson = await storage.createLesson(lessonData);
       res.json(lesson);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
-  // Video upload route
-  app.post("/api/upload/video", upload.single('video'), async (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ message: "No video file uploaded" });
-      }
-      
-      // In production, this would upload to AWS S3 or similar
-      const videoUrl = `/uploads/${req.file.filename}`;
-      res.json({ videoUrl });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
+  app.post("/api/upload/video", upload.single("video"), (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "No video uploaded" });
+    res.json({ videoUrl: `/uploads/${req.file.filename}` });
   });
 
-  // Quiz routes
+  // Quizzes
   app.get("/api/quizzes/:id", async (req, res) => {
     try {
-      const quizId = parseInt(req.params.id);
-      const quiz = await storage.getQuiz(quizId);
-      
-      if (!quiz) {
-        return res.status(404).json({ message: "Quiz not found" });
-      }
-      
+      const quiz = await storage.getQuiz(parseInt(req.params.id));
+      if (!quiz) return res.status(404).json({ message: "Quiz not found" });
       res.json(quiz);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
   app.post("/api/quizzes", async (req, res) => {
     try {
-      const quizData = insertQuizSchema.parse(req.body);
-      const quiz = await storage.createQuiz(quizData);
+      const quiz = await storage.createQuiz(insertQuizSchema.parse(req.body));
       res.json(quiz);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
   app.post("/api/quizzes/:id/attempts", async (req, res) => {
     try {
-      const quizId = parseInt(req.params.id);
+      const quiz = await storage.getQuiz(parseInt(req.params.id));
+      if (!quiz) return res.status(404).json({ message: "Quiz not found" });
       const { userId, answers } = req.body;
-      
-      const quiz = await storage.getQuiz(quizId);
-      if (!quiz) {
-        return res.status(404).json({ message: "Quiz not found" });
-      }
-      
-      // Calculate score
-      const questions = quiz.questions as any[];
-      let correctAnswers = 0;
-      
-      answers.forEach((answer: number, index: number) => {
-        if (questions[index] && questions[index].correctAnswer === answer) {
-          correctAnswers++;
-        }
-      });
-      
-      const score = Math.round((correctAnswers / questions.length) * 100);
+      const questions = Array.isArray(quiz.questions) ? (quiz.questions as any[]) : [];
+      const correct = questions.filter((q: any, i: number) => q.correctAnswer === answers[i]);
+      const score = Math.round((correct.length / questions.length) * 100);
       const passed = score >= quiz.passingScore;
-      
-      const attempt = await storage.createQuizAttempt({
-        quizId,
-        userId,
-        answers,
-        score,
-        passed
-      });
-      
+      const attempt = await storage.createQuizAttempt({ quizId: quiz.id, userId, answers, score, passed });
       res.json(attempt);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
-  // Enrollment routes
+  // Enrollments
   app.post("/api/enrollments", async (req, res) => {
     try {
-      const enrollmentData = insertEnrollmentSchema.parse(req.body);
-      const enrollment = await storage.createEnrollment(enrollmentData);
+      const enrollment = await storage.createEnrollment(insertEnrollmentSchema.parse(req.body));
       res.json(enrollment);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
   app.get("/api/users/:userId/enrollments", async (req, res) => {
     try {
-      const userId = parseInt(req.params.userId);
-      const enrollments = await storage.getEnrollmentsByUser(userId);
-      
-      // Get course details for each enrollment
-      const enrollmentsWithCourses = await Promise.all(
-        enrollments.map(async (enrollment) => {
-          const course = await storage.getCourse(enrollment.courseId);
-          return { ...enrollment, course };
-        })
-      );
-      
-      res.json(enrollmentsWithCourses);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+      const enrollments = await storage.getEnrollmentsByUser(parseInt(req.params.userId));
+      const enriched = await Promise.all(enrollments.map(async (e) => ({ ...e, course: await storage.getCourse(e.courseId) })));
+      res.json(enriched);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
   app.put("/api/enrollments/:id/progress", async (req, res) => {
     try {
-      const enrollmentId = parseInt(req.params.id);
       const { progress } = req.body;
-      
-      const enrollment = await storage.updateEnrollment(enrollmentId, { progress });
-      
-      if (!enrollment) {
-        return res.status(404).json({ message: "Enrollment not found" });
-      }
-      
-      // If course is completed (100% progress), generate certificate
+      const enrollment = await storage.updateEnrollment(parseInt(req.params.id), { progress });
+      if (!enrollment) return res.status(404).json({ message: "Enrollment not found" });
+      let certificate = null;
       if (progress === 100) {
-        const certificate = await storage.createCertificate({
+        certificate = await storage.createCertificate({
           userId: enrollment.userId,
           courseId: enrollment.courseId,
-          certificateUrl: `/certificates/${enrollment.userId}-${enrollment.courseId}.pdf`
+          certificateUrl: `/certificates/${enrollment.userId}-${enrollment.courseId}.pdf`,
         });
-        
-        res.json({ enrollment, certificate });
-      } else {
-        res.json({ enrollment });
       }
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+      res.json({ enrollment, certificate });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
-  // Certificate routes
+  // Certificates
   app.get("/api/users/:userId/certificates", async (req, res) => {
     try {
-      const userId = parseInt(req.params.userId);
-      const certificates = await storage.getCertificatesByUser(userId);
-      
-      // Get course details for each certificate
-      const certificatesWithCourses = await Promise.all(
-        certificates.map(async (certificate) => {
-          const course = await storage.getCourse(certificate.courseId);
-          return { ...certificate, course };
-        })
-      );
-      
-      res.json(certificatesWithCourses);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+      const certificates = await storage.getCertificatesByUser(parseInt(req.params.userId));
+      const enriched = await Promise.all(certificates.map(async (c) => ({ ...c, course: await storage.getCourse(c.courseId) })));
+      res.json(enriched);
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  // Payments
+  app.post("/api/create-order", async (req, res) => {
+    try {
+      const { courseId, userId } = req.body;
+      const course = await storage.getCourse(courseId);
+      if (!course) return res.status(404).json({ message: "Course not found" });
+      const amount = Math.round(parseFloat(course.price) * 100);
+      const order = await razorpay.orders.create({
+        amount,
+        currency: "INR",
+        receipt: `receipt_${Date.now()}`,
+        notes: { courseId: String(courseId), userId: String(userId) },
+      });
+      await storage.createPayment({ userId, courseId, amount: course.price, razorpayOrderId: order.id, status: "pending" });
+      res.json({ orderId: order.id, amount: order.amount, currency: order.currency });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
+    }
+  });
+
+  app.post("/api/verify-payment", async (req, res) => {
+    try {
+      const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+      const expected = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET!)
+        .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+        .digest("hex");
+
+      if (expected !== razorpay_signature) {
+        return res.status(400).json({ success: false, message: "Invalid signature" });
+      }
+
+      const payment = await storage.getPaymentByOrderId(razorpay_order_id);
+      if (!payment) return res.status(404).json({ message: "Payment not found" });
+
+      await storage.updatePayment(payment.id, { status: "completed", razorpayPaymentId: razorpay_payment_id });
+      await storage.createEnrollment({ userId: payment.userId, courseId: payment.courseId, progress: 0 });
+
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
   // Payment routes
-  app.post("/api/create-payment-intent", async (req, res) => {
-    try {
-      if (!stripe) {
-        return res.status(500).json({ message: "Stripe is not configured. Please set STRIPE_SECRET_KEY environment variable." });
-      }
-      
-      const { courseId, userId } = req.body;
-      
-      const course = await storage.getCourse(courseId);
-      if (!course) {
-        return res.status(404).json({ message: "Course not found" });
-      }
-      
-      const amount = Math.round(parseFloat(course.price) * 100); // Convert to cents
-      
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount,
-        currency: "usd",
-        metadata: {
-          courseId: courseId.toString(),
-          userId: userId.toString()
-        }
-      });
-      
-      // Create payment record
-      await storage.createPayment({
-        userId,
-        courseId,
-        amount: course.price,
-        stripePaymentIntentId: paymentIntent.id,
-        status: "pending"
-      });
-      
-      res.json({ clientSecret: paymentIntent.client_secret });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
+  app.use("/api", paymentRoutes);
 
-  app.post("/api/payments/confirm", async (req, res) => {
-    try {
-      const { paymentIntentId } = req.body;
-      
-      if (!stripe) {
-        return res.status(500).json({ message: "Stripe is not configured" });
-      }
-      
-      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-      
-      if (paymentIntent.status === 'succeeded') {
-        const { courseId, userId } = paymentIntent.metadata;
-        
-        // Update payment status
-        const payments = await storage.getPaymentsByUser(parseInt(userId));
-        const payment = payments.find(p => p.stripePaymentIntentId === paymentIntentId);
-        
-        if (payment) {
-          await storage.updatePayment(payment.id, { status: "completed" });
-        }
-        
-        // Enroll user in course
-        await storage.createEnrollment({
-          userId: parseInt(userId),
-          courseId: parseInt(courseId),
-          progress: 0
-        });
-        
-        res.json({ success: true });
-      } else {
-        res.status(400).json({ message: "Payment not completed" });
-      }
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  // Dashboard stats
+  // Stats
   app.get("/api/users/:userId/stats", async (req, res) => {
     try {
       const userId = parseInt(req.params.userId);
-      
-      const enrollments = await storage.getEnrollmentsByUser(userId);
-      const certificates = await storage.getCertificatesByUser(userId);
-      const quizAttempts = await storage.getQuizAttemptsByUser(userId);
-      
-      const completedCourses = enrollments.filter(e => e.progress === 100);
-      const totalProgress = enrollments.reduce((sum, e) => sum + e.progress, 0);
-      const avgProgress = enrollments.length > 0 ? Math.round(totalProgress / enrollments.length) : 0;
-      
-      // Calculate total hours learned (mock calculation)
-      const totalHours = enrollments.length * 8; // Assume 8 hours per enrolled course
-      
+      const [enrollments, certificates, quizAttempts] = await Promise.all([
+        storage.getEnrollmentsByUser(userId),
+        storage.getCertificatesByUser(userId),
+        storage.getQuizAttemptsByUser(userId),
+      ]);
+      const completed = enrollments.filter((e) => e.progress === 100);
+      const avgProgress = enrollments.length ? Math.round(enrollments.reduce((s, e) => s + e.progress, 0) / enrollments.length) : 0;
       res.json({
         enrolledCourses: enrollments.length,
         completionRate: avgProgress,
         certificates: certificates.length,
-        hoursLearned: totalHours,
-        completedCourses: completedCourses.length,
-        passedQuizzes: quizAttempts.filter(a => a.passed).length
+        hoursLearned: enrollments.length * 8,
+        completedCourses: completed.length,
+        passedQuizzes: quizAttempts.filter((a) => a.passed).length,
       });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+    } catch (e: any) {
+      res.status(500).json({ message: e.message });
     }
   });
 
-  // Serve uploaded files
-  app.use('/uploads', express.static('uploads'));
-
-  const httpServer = createServer(app);
-  return httpServer;
+  return createServer(app);
 }
